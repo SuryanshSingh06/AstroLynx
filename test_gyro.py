@@ -14,7 +14,7 @@ pygame.init()
 
 WIDTH, HEIGHT = 1500, 780
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Astronaut Hub Map - IMU Real Location")
+pygame.display.set_caption("Astronaut Hub Map - IMU Velocity Control")
 clock = pygame.time.Clock()
 font    = pygame.font.SysFont(None, 24)
 sm_font = pygame.font.SysFont(None, 18)
@@ -24,7 +24,7 @@ SCALE = 60
 
 MOVE_SPEED          = 0.04
 TURN_SPEED          = 2.5
-PATH_RECORD_DIST    = 0.10
+PATH_RECORD_DIST    = 0.08
 MAX_PATH_POINTS     = 400
 GRAPH_CONNECT_R     = 0.40
 GAP_BRIDGE_PENALTY  = 2.5
@@ -32,37 +32,34 @@ LOS_SAMPLE_STEP     = 0.20
 LOS_CLEAR_RADIUS    = 0.45
 PATH_RECOMPUTE_FREQ = 15
 
-# ── IMU / Serial ─────────────────────────────────────────────────────────────
+# ── IMU / Serial ──────────────────────────────────────────────────────────────
 SERIAL_PORT  = "/dev/ttyUSB0"
 SERIAL_BAUD  = 115200
 IMU_ASTRO_ID = 1
 
-MAX_TILT  = 45.0   # degrees full tilt → edge of map
-MAP_RANGE =  6.0   # metres
+# ── IMU smoothing (median + EMA) ──────────────────────────────────────────────
+MEDIAN_N  = 9      # rolling window for spike rejection (must be odd)
+EMA_ALPHA = 0.20   # how quickly the filtered angle tracks the median (0=frozen,1=raw)
+DEADBAND  = 3.0    # degrees — below this treated as zero (sensor noise floor)
 
-# ── IMU smoothing ─────────────────────────────────────────────────────────────
-# Layer 1 — median filter (circular buffer of MEDIAN_N samples).
-#            Kills individual spikes completely — one bad reading
-#            cannot move the output at all as long as it stays in
-#            the minority of the buffer.
-# Layer 2 — EMA on the median → smooths the continuous trend.
-# Layer 3 — deadband → ignores sensor noise floor near zero.
+# ── Velocity-based movement ───────────────────────────────────────────────────
 #
-# Rule of thumb:
-#   MEDIAN_N  ↑  →  better spike rejection, 1–2 frame extra lag
-#   EMA_ALPHA ↑  →  faster response, less smoothing  (0=frozen, 1=raw)
-#   DEADBAND  ↑  →  larger dead-zone at rest
-
-MEDIAN_N  = 9      # must be odd
-EMA_ALPHA = 0.15   # ~6-frame effective window
-DEADBAND  = 2.5    # degrees
-
-_buf = {k: deque([0.0]*MEDIAN_N, maxlen=MEDIAN_N) for k in ("X","Y","Z")}
-f_angX = f_angY = f_angZ = 0.0
-
-def _push_and_median(key, val):
-    _buf[key].append(val)
-    return statistics.median(_buf[key])
+# Tilt angle → speed, NOT position.
+# Think of the board as a joystick:
+#   • flat             → stop
+#   • small tilt       → slow creep
+#   • large tilt       → fast movement
+#
+# MAX_TILT_DEG  : tilt angle that maps to MAX_SPEED (metres/sec)
+# MAX_SPEED     : max metres per second at full tilt
+# FRICTION      : velocity multiplied by this each frame (0.85 = snappy stop,
+#                 0.95 = slides a bit, 0.99 = very slippery)
+# MAP_LIMIT     : world boundary in metres (astronaut can't leave this)
+#
+MAX_TILT_DEG = 30.0    # degrees → full speed
+MAX_SPEED    = 3.0     # metres / second at full tilt
+FRICTION     = 0.88    # per-frame velocity decay when tilt is in deadband
+MAP_LIMIT    = 8.0     # metres from origin
 
 # ── Camera / Pi ───────────────────────────────────────────────────────────────
 PI_BASE_URL       = "http://127.0.0.1:5000"
@@ -77,17 +74,24 @@ camera_poll_counter    = 0
 # ── IMU shared state ──────────────────────────────────────────────────────────
 imu_lock = threading.Lock()
 imu_data = {
-    "ax":0.0,"ay":0.0,"az":0.0,
-    "gx":0.0,"gy":0.0,"gz":0.0,
-    "angX":0.0,"angY":0.0,"angZ":0.0,
-    "connected":False, "raw":"",
+    "angX": 0.0, "angY": 0.0, "angZ": 0.0,
+    "connected": False, "raw": "",
 }
+
+# ── Smoothing state ───────────────────────────────────────────────────────────
+_buf   = {k: deque([0.0]*MEDIAN_N, maxlen=MEDIAN_N) for k in ("X","Y")}
+f_angX = 0.0   # filtered pitch (→ world Y velocity)
+f_angY = 0.0   # filtered roll  (→ world X velocity)
+
+# ── Velocity state for IMU astronaut ─────────────────────────────────────────
+vel_x = 0.0
+vel_y = 0.0
 
 # ── Astronaut state ───────────────────────────────────────────────────────────
 astronauts = {
-    1: {"x": 0.0, "y": 0.0, "heading": 0.0, "status":"safe", "path":[(0.0,0.0)]},
-    2: {"x": 2.0, "y": 1.0, "heading":90.0, "status":"safe", "path":[(2.0,1.0)]},
-    3: {"x":-2.0, "y":-1.0, "heading":45.0, "status":"safe", "path":[(-2.0,-1.0)]},
+    1: {"x": 0.0, "y": 0.0, "heading": 0.0, "status": "safe", "path": [(0.0, 0.0)]},
+    2: {"x": 2.0, "y": 1.0, "heading":90.0, "status": "safe", "path": [(2.0, 1.0)]},
+    3: {"x":-2.0, "y":-1.0, "heading":45.0, "status": "safe", "path": [(-2.0,-1.0)]},
 }
 
 checkpoints          = []
@@ -113,7 +117,7 @@ def dist_between(a1,a2): return hyp(a1["x"],a1["y"],a2["x"],a2["y"])
 def dist_from_hub(aid): return math.hypot(astronauts[aid]["x"],astronauts[aid]["y"])
 def path_length(pts): return sum(hyp(pts[i][0],pts[i][1],pts[i-1][0],pts[i-1][1]) for i in range(1,len(pts)))
 
-# ── Serial reader thread ──────────────────────────────────────────────────────
+# ── Serial reader ─────────────────────────────────────────────────────────────
 def serial_reader():
     while True:
         try:
@@ -132,13 +136,12 @@ def serial_reader():
                         vals = list(map(float, parts))
                     except ValueError:
                         continue
+                    # vals: ax,ay,az,gx,gy,gz,angX,angY,angZ
                     with imu_lock:
-                        imu_data.update({
-                            "ax":vals[0],"ay":vals[1],"az":vals[2],
-                            "gx":vals[3],"gy":vals[4],"gz":vals[5],
-                            "angX":vals[6],"angY":vals[7],"angZ":vals[8],
-                            "raw":raw,
-                        })
+                        imu_data["angX"] = vals[6]
+                        imu_data["angY"] = vals[7]
+                        imu_data["angZ"] = vals[8]
+                        imu_data["raw"]  = raw
         except (serial.SerialException, OSError):
             with imu_lock:
                 imu_data["connected"] = False
@@ -146,42 +149,84 @@ def serial_reader():
 
 threading.Thread(target=serial_reader, daemon=True).start()
 
-# ── IMU → world (median + EMA + deadband) ────────────────────────────────────
-def apply_imu_to_astronaut(aid):
-    global f_angX, f_angY, f_angZ
+# ── IMU update (velocity-based) ───────────────────────────────────────────────
+def apply_imu_to_astronaut(aid, dt):
+    """
+    Each frame:
+      1. Read latest raw angles from serial thread.
+      2. Median filter  → kills single-sample spikes.
+      3. EMA            → smooths continuous trend.
+      4. Deadband       → zero out sensor noise near flat.
+      5. Convert angle  → target velocity (proportional, capped).
+      6. Apply friction when inside deadband (natural deceleration).
+      7. Integrate velocity → new position.
+      8. Derive heading from velocity direction (no drifty gyro yaw).
+    """
+    global f_angX, f_angY, vel_x, vel_y
 
     with imu_lock:
-        raw_X  = imu_data["angX"]
-        raw_Y  = imu_data["angY"]
-        raw_Z  = imu_data["angZ"]
-        conn   = imu_data["connected"]
+        raw_X = imu_data["angX"]
+        raw_Y = imu_data["angY"]
+        conn  = imu_data["connected"]
     if not conn:
         return
 
-    # Layer 1 — median (spike killer)
-    med_X = _push_and_median("X", raw_X)
-    med_Y = _push_and_median("Y", raw_Y)
-    med_Z = _push_and_median("Z", raw_Z)
+    # ── Layer 1: median (spike rejection) ─────────────────────────────────
+    _buf["X"].append(raw_X)
+    _buf["Y"].append(raw_Y)
+    med_X = statistics.median(_buf["X"])
+    med_Y = statistics.median(_buf["Y"])
 
-    # Layer 2 — EMA (trend smoother)
-    f_angX = (1.0-EMA_ALPHA)*f_angX + EMA_ALPHA*med_X
-    f_angY = (1.0-EMA_ALPHA)*f_angY + EMA_ALPHA*med_Y
-    f_angZ = (1.0-EMA_ALPHA)*f_angZ + EMA_ALPHA*med_Z
+    # ── Layer 2: EMA (trend smoothing) ────────────────────────────────────
+    f_angX = (1.0 - EMA_ALPHA)*f_angX + EMA_ALPHA*med_X
+    f_angY = (1.0 - EMA_ALPHA)*f_angY + EMA_ALPHA*med_Y
 
-    # Layer 3 — deadband (noise floor)
-    angX = 0.0 if abs(f_angX) < DEADBAND else f_angX
-    angY = 0.0 if abs(f_angY) < DEADBAND else f_angY
+    # ── Layer 3: deadband ─────────────────────────────────────────────────
+    eff_X = 0.0 if abs(f_angX) < DEADBAND else f_angX
+    eff_Y = 0.0 if abs(f_angY) < DEADBAND else f_angY
 
-    # Map angles → world coords
-    new_x =  max(-1.0, min(1.0, angY / MAX_TILT)) * MAP_RANGE
-    new_y =  max(-1.0, min(1.0, angX / MAX_TILT)) * MAP_RANGE
+    # ── Layer 4: angle → velocity ─────────────────────────────────────────
+    # Clamp to ±MAX_TILT_DEG, normalise to -1…+1, scale to MAX_SPEED m/s
+    # angY (roll)  → X axis   (tilt right  = move right)
+    # angX (pitch) → Y axis   (tilt forward = move up on map)
+    tgt_vx =  (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, eff_Y)) / MAX_TILT_DEG) * MAX_SPEED
+    tgt_vy =  (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, eff_X)) / MAX_TILT_DEG) * MAX_SPEED
 
+    if eff_X == 0.0 and eff_Y == 0.0:
+        # Inside deadband → apply friction, decelerate naturally
+        vel_x *= FRICTION
+        vel_y *= FRICTION
+        # Stop completely below tiny threshold to avoid forever-creep
+        if abs(vel_x) < 0.002: vel_x = 0.0
+        if abs(vel_y) < 0.002: vel_y = 0.0
+    else:
+        # Outside deadband → blend current velocity toward target velocity
+        # Using same EMA idea: fast response (0.25) feels snappy
+        VEL_ALPHA = 0.25
+        vel_x = (1.0-VEL_ALPHA)*vel_x + VEL_ALPHA*tgt_vx
+        vel_y = (1.0-VEL_ALPHA)*vel_y + VEL_ALPHA*tgt_vy
+
+    # ── Layer 5: integrate position ───────────────────────────────────────
     a = astronauts[aid]
     old_x, old_y = a["x"], a["y"]
+
+    new_x = old_x + vel_x * dt
+    new_y = old_y + vel_y * dt
+
+    # Clamp to map boundary
+    new_x = max(-MAP_LIMIT, min(MAP_LIMIT, new_x))
+    new_y = max(-MAP_LIMIT, min(MAP_LIMIT, new_y))
+
     a["x"] = new_x
     a["y"] = new_y
-    a["heading"] = f_angZ % 360
 
+    # ── Layer 6: heading from velocity direction ───────────────────────────
+    # Derive from movement direction — avoids drifty gyro yaw entirely
+    speed = math.hypot(vel_x, vel_y)
+    if speed > 0.05:
+        a["heading"] = math.degrees(math.atan2(vel_y, vel_x)) % 360
+
+    # ── Record path ───────────────────────────────────────────────────────
     if hyp(new_x, new_y, old_x, old_y) >= PATH_RECORD_DIST:
         a["path"].append((new_x, new_y))
         if len(a["path"]) > MAX_PATH_POINTS:
@@ -201,11 +246,11 @@ def update_camera_feed():
     except Exception:
         pass
 
-# ── Movement (keyboard A2/A3) ─────────────────────────────────────────────────
+# ── Keyboard movement (A2/A3) ─────────────────────────────────────────────────
 def record_path(aid):
     a,p = astronauts[aid], astronauts[aid]["path"]
     if p:
-        lx,ly = p[-1]
+        lx,ly=p[-1]
         if hyp(a["x"],a["y"],lx,ly) >= PATH_RECORD_DIST:
             p.append((a["x"],a["y"]))
             if len(p)>MAX_PATH_POINTS: del p[0]
@@ -360,9 +405,10 @@ def toggle_danger(aid):
     path_dirty=True
 
 def reset_all():
-    global hub_alert,transmit_signal,shortest_paths,bridge_segments,path_dirty
+    global hub_alert,transmit_signal,shortest_paths,bridge_segments,path_dirty,vel_x,vel_y
     danger_astronaut_ids.clear(); helper_assignments.clear()
     shortest_paths={}; bridge_segments={}; hub_alert=transmit_signal=False; path_dirty=False
+    vel_x=vel_y=0.0
     for aid in astronauts:
         astronauts[aid]["status"]="safe"
         astronauts[aid]["path"]=[(astronauts[aid]["x"],astronauts[aid]["y"])]
@@ -373,8 +419,14 @@ def draw_diamond(cx,cy,sz,fill,outline):
     pygame.draw.polygon(screen,fill,pts); pygame.draw.polygon(screen,outline,pts,1)
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
-running=True
+prev_time = time.time()
+running   = True
+
 while running:
+    now = time.time()
+    dt  = min(now - prev_time, 0.05)   # cap at 50ms so a lag spike can't teleport
+    prev_time = now
+
     frame_count+=1; clock.tick(60); screen.fill((20,20,30))
 
     camera_poll_counter+=1
@@ -383,7 +435,8 @@ while running:
         if camera_person_detected and CAMERA_TARGET_AID not in danger_astronaut_ids:
             danger_astronaut_ids.add(CAMERA_TARGET_AID); path_dirty=True
 
-    apply_imu_to_astronaut(IMU_ASTRO_ID)
+    # IMU astronaut update with real delta-time
+    apply_imu_to_astronaut(IMU_ASTRO_ID, dt)
 
     for gx in range(0,CENTER_X*2,SCALE): pygame.draw.line(screen,(40,40,50),(gx,0),(gx,HEIGHT))
     for gy in range(0,HEIGHT,SCALE):     pygame.draw.line(screen,(40,40,50),(0,gy),(CENTER_X*2,gy))
@@ -467,38 +520,36 @@ while running:
     # HUD
     yt=20
     if hub_alert: screen.blit(font.render("HUB ALERT: Danger detected",True,(255,80,80)),(20,yt)); yt+=28
-    if transmit_signal: screen.blit(font.render("TRANSMIT STATE: All astronauts in danger",True,(255,180,50)),(20,yt)); yt+=28
+    if transmit_signal: screen.blit(font.render("TRANSMIT STATE: All in danger",True,(255,180,50)),(20,yt)); yt+=28
     if helper_assignments:
         for did,sid in helper_assignments.items():
             sp=shortest_paths.get(did,[]); nb=len(bridge_segments.get(did,[]))
             info=f"  ({path_length(sp):.2f}m, {nb} bridge{'s' if nb!=1 else ''})" if sp else ""
             screen.blit(font.render(f"A{sid} -> A{did}{info}",True,(50,200,255)),(20,yt)); yt+=28
     elif danger_astronaut_ids and not transmit_signal:
-        screen.blit(font.render("No available helper for danger astronauts",True,(255,180,50)),(20,yt)); yt+=28
+        screen.blit(font.render("No helper available",True,(255,180,50)),(20,yt)); yt+=28
     if checkpoints:
-        screen.blit(font.render(f"Checkpoints: {len(checkpoints)}   [DEL to clear]",True,(220,220,80)),(20,yt)); yt+=28
+        screen.blit(font.render(f"Checkpoints: {len(checkpoints)}  [DEL=clear]",True,(220,220,80)),(20,yt)); yt+=28
 
-    # IMU status bar + smoothing debug
+    # IMU debug bar
     with imu_lock:
-        conn=imu_data["connected"]; raw_str=imu_data["raw"]
+        conn=imu_data["connected"]
     imu_col=(80,255,80) if conn else (255,80,80)
+    spd=math.hypot(vel_x,vel_y)
     screen.blit(font.render(
         f"IMU A1 | {'LIVE' if conn else 'NO SIGNAL'} | "
-        f"raw angX={_buf['X'][-1] if _buf['X'] else 0:.1f}° → "
-        f"med={statistics.median(_buf['X']):.1f}° → "
-        f"ema={f_angX:.1f}°",
+        f"pitch={f_angX:.1f}°  roll={f_angY:.1f}° | "
+        f"vel=({vel_x:.2f},{vel_y:.2f}) m/s  speed={spd:.2f} m/s",
         True,imu_col),(20,HEIGHT-55))
     screen.blit(font.render(
-        f"angY raw={_buf['Y'][-1] if _buf['Y'] else 0:.1f}° → "
-        f"med={statistics.median(_buf['Y']):.1f}° → "
-        f"ema={f_angY:.1f}°  |  "
-        f"MEDIAN_N={MEDIAN_N}  EMA_α={EMA_ALPHA}  deadband=±{DEADBAND}°",
-        True,(160,160,200)),(20,HEIGHT-30))
+        f"MEDIAN_N={MEDIAN_N}  EMA_α={EMA_ALPHA}  deadband=±{DEADBAND}°  "
+        f"friction={FRICTION}  max_speed={MAX_SPEED}m/s",
+        True,(140,140,180)),(20,HEIGHT-30))
 
     legend=[
-        "A1: IMU tilt board (angY→X, angX→Y)   Q=checkpoint",
-        "A2: I/K move J/L turn  U=checkpoint    A3: T/G move F/H turn  B=checkpoint",
-        "1/2/3 toggle danger | R reset | DEL clear checkpoints",
+        "A1: tilt board to move (velocity control — flat=stop, tilt more=faster)",
+        "A2: I/K move  J/L turn  U=checkpoint     A3: T/G move  F/H turn  B=checkpoint",
+        "1/2/3 toggle danger | R reset | DEL clear checkpoints | Q=A1 checkpoint",
     ]
     for i,line in enumerate(legend):
         screen.blit(font.render(line,True,(180,180,180)),(20,HEIGHT-115+i*25))
