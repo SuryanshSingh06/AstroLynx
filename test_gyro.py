@@ -62,6 +62,13 @@ imu_data = {
     "raw": "",
 }
 
+# ── IMU smoothing ────────────────────────────────────────────────────────────
+f_angX = 0.0
+f_angY = 0.0
+f_angZ = 0.0
+
+ALPHA = 0.05
+DEADBAND = 3.0
 # ── Astronaut state ──────────────────────────────────────────────────────────
 astronauts = {
     1: {"x":  0.0, "y":  0.0, "heading":  0.0, "status": "safe", "path": [(0.0,  0.0)]},
@@ -161,21 +168,38 @@ serial_thread.start()
 # Clamped to ±MAX_TILT degrees, scaled to ±MAP_RANGE metres.
 # ════════════════════════════════════════════════════════════════════════════
 def apply_imu_to_astronaut(aid):
+    global f_angX, f_angY, f_angZ
+
     with imu_lock:
-        angX = imu_data["angX"]
-        angY = imu_data["angY"]
-        angZ = imu_data["angZ"]
+        raw_angX = imu_data["angX"]
+        raw_angY = imu_data["angY"]
+        raw_angZ = imu_data["angZ"]
         connected = imu_data["connected"]
 
     if not connected:
         return
 
-    # Clamp and normalise: -1.0 … +1.0
+    # 1) low-pass filter
+    f_angX = (1.0 - ALPHA) * f_angX + ALPHA * raw_angX
+    f_angY = (1.0 - ALPHA) * f_angY + ALPHA * raw_angY
+    f_angZ = (1.0 - ALPHA) * f_angZ + ALPHA * raw_angZ
+
+    angX = f_angX
+    angY = f_angY
+    angZ = f_angZ
+
+    # 2) deadband near zero
+    if abs(angX) < DEADBAND:
+        angX = 0.0
+    if abs(angY) < DEADBAND:
+        angY = 0.0
+
+    # 3) clamp and map to world
     nx = max(-1.0, min(1.0, angY / MAX_TILT))
     ny = max(-1.0, min(1.0, angX / MAX_TILT))
 
-    new_x =  nx * MAP_RANGE
-    new_y =  ny * MAP_RANGE
+    new_x = nx * MAP_RANGE
+    new_y = ny * MAP_RANGE
 
     a = astronauts[aid]
     old_x, old_y = a["x"], a["y"]
@@ -522,8 +546,11 @@ while running:
     # IMU status bar
     with imu_lock:
         connected = imu_data["connected"]
-        angX = imu_data["angX"]; angY = imu_data["angY"]; angZ = imu_data["angZ"]
-        raw  = imu_data["raw"]
+        raw = imu_data["raw"]
+
+    angX = f_angX
+    angY = f_angY
+    angZ = f_angZ
     imu_col = (80,255,80) if connected else (255,80,80)
     imu_status = (f"IMU A1 | {'LIVE' if connected else 'NO SIGNAL'} | "
                   f"angX={angX:.1f}° angY={angY:.1f}° angZ={angZ:.1f}°")
