@@ -1,277 +1,362 @@
 import pygame
-from collections import deque
+import math
+import heapq
 
 pygame.init()
 
-WIDTH, HEIGHT = 1000, 700
+WIDTH, HEIGHT = 1150, 780
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Astronaut Hub Map with Trails + Shortest Path")
+pygame.display.set_caption("Astronaut Hub Map - Path Tracking + Shortest Path")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
-
-CELL = 40
-GRID_COLS = WIDTH // CELL
-GRID_ROWS = HEIGHT // CELL
+small_font = pygame.font.SysFont(None, 18)
 
 CENTER_X, CENTER_Y = WIDTH // 2, HEIGHT // 2
+SCALE = 60  # pixels per meter
 
-# Optional obstacles for pathfinding demo
-obstacles = set()
-# Example wall:
-# for r in range(5, 12):
-#     obstacles.add((10, r))
+MOVE_SPEED = 0.04
+TURN_SPEED = 2.5
+
+# Path / graph settings
+PATH_SAMPLE_DIST = 0.09     # record waypoint every ~0.09m
+MAX_PATH_PTS     = 500      # cap per astronaut
+MAX_EDGE_DIST    = 0.38     # max gap to connect two waypoints in graph
+REBUILD_INTERVAL = 12       # recompute shortest path every N frames
 
 astronauts = {
-    1: {
-        "gx": 12, "gy": 8,
-        "status": "safe",
-        "trail_color": (255, 120, 120),
-        "path": [(12, 8)]
-    },
-    2: {
-        "gx": 15, "gy": 6,
-        "status": "safe",
-        "trail_color": (120, 255, 120),
-        "path": [(15, 6)]
-    },
-    3: {
-        "gx": 8, "gy": 10,
-        "status": "safe",
-        "trail_color": (120, 160, 255),
-        "path": [(8, 10)]
-    },
+    1: {"x": 0.0,  "y": 0.0,  "heading": 0.0,  "status": "safe"},
+    2: {"x": 2.0,  "y": 1.0,  "heading": 90.0, "status": "safe"},
+    3: {"x": -2.0, "y": -1.0, "heading": 45.0, "status": "safe"},
 }
 
-current_rescue_path = []
+path_history      = {1: [], 2: [], 3: []}   # list of (x, y) per astronaut
+checkpoints       = []                       # {"x","y","label","aid"}
+danger_astronaut_ids = set()
+helper_assignments   = {}                    # danger_id -> helper_id
+hub_alert    = False
+transmit_signal = False
+shortest_paths  = {}                         # danger_id -> list of (x,y)
+frame_counter   = 0
 
-def grid_to_screen(gx, gy):
-    x = gx * CELL + CELL // 2
-    y = gy * CELL + CELL // 2
-    return x, y
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-def in_bounds(gx, gy):
-    return 0 <= gx < GRID_COLS and 0 <= gy < GRID_ROWS
+def world_to_screen(x, y):
+    return (int(CENTER_X + x * SCALE), int(CENTER_Y - y * SCALE))
 
-def neighbors(gx, gy):
-    dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    result = []
-    for dx, dy in dirs:
-        nx, ny = gx + dx, gy + dy
-        if in_bounds(nx, ny) and (nx, ny) not in obstacles:
-            result.append((nx, ny))
-    return result
+def record_path(aid):
+    a    = astronauts[aid]
+    hist = path_history[aid]
+    pos  = (a["x"], a["y"])
+    if not hist or math.dist(hist[-1], pos) >= PATH_SAMPLE_DIST:
+        hist.append(pos)
+        if len(hist) > MAX_PATH_PTS:
+            hist.pop(0)
 
-def bfs_shortest_path(start, goal):
-    if start == goal:
-        return [start]
+def move_forward(aid, speed=MOVE_SPEED):
+    a = astronauts[aid]
+    r = math.radians(a["heading"])
+    a["x"] += speed * math.cos(r); a["y"] += speed * math.sin(r)
+    record_path(aid)
 
-    q = deque([start])
-    came_from = {start: None}
+def move_backward(aid, speed=MOVE_SPEED):
+    a = astronauts[aid]
+    r = math.radians(a["heading"])
+    a["x"] -= speed * math.cos(r); a["y"] -= speed * math.sin(r)
+    record_path(aid)
 
-    while q:
-        current = q.popleft()
-        if current == goal:
-            break
+def turn_left(aid,  amt=TURN_SPEED): astronauts[aid]["heading"] = (astronauts[aid]["heading"] - amt) % 360
+def turn_right(aid, amt=TURN_SPEED): astronauts[aid]["heading"] = (astronauts[aid]["heading"] + amt) % 360
 
-        for nxt in neighbors(*current):
-            if nxt not in came_from:
-                came_from[nxt] = current
-                q.append(nxt)
+def dist_between(a1, a2):
+    return math.sqrt((a1["x"]-a2["x"])**2 + (a1["y"]-a2["y"])**2)
 
-    if goal not in came_from:
-        return None
+def dist_from_hub(aid):
+    a = astronauts[aid]
+    return math.sqrt(a["x"]**2 + a["y"]**2)
 
-    path = []
-    cur = goal
-    while cur is not None:
-        path.append(cur)
-        cur = came_from[cur]
-    path.reverse()
-    return path
+def set_checkpoint(aid):
+    a = astronauts[aid]
+    checkpoints.append({"x": a["x"], "y": a["y"],
+                        "label": f"CP{len(checkpoints)+1}·A{aid}", "aid": aid})
 
-def move_astronaut(astro_id, dx, dy):
-    a = astronauts[astro_id]
-    nx, ny = a["gx"] + dx, a["gy"] + dy
+def toggle_danger(aid):
+    if aid in danger_astronaut_ids: danger_astronaut_ids.remove(aid)
+    else:                           danger_astronaut_ids.add(aid)
+    update_assignments()
 
-    if not in_bounds(nx, ny):
-        return
-    if (nx, ny) in obstacles:
-        return
+def reset_all():
+    global hub_alert, transmit_signal
+    danger_astronaut_ids.clear(); helper_assignments.clear()
+    hub_alert = transmit_signal = False
+    shortest_paths.clear()
+    for a in astronauts.values(): a["status"] = "safe"
 
-    a["gx"], a["gy"] = nx, ny
+# ── Assignment logic (unchanged) ────────────────────────────────────────────
 
-    # Keep track of trail
-    if a["path"][-1] != (nx, ny):
-        a["path"].append((nx, ny))
+def update_assignments():
+    global helper_assignments, hub_alert, transmit_signal
 
-def reset_statuses():
-    global current_rescue_path
+    for a in astronauts.values(): a["status"] = "safe"
+    helper_assignments.clear()
+    hub_alert       = len(danger_astronaut_ids) > 0
+    transmit_signal = len(danger_astronaut_ids) == len(astronauts)
+
+    for did in danger_astronaut_ids: astronauts[did]["status"] = "danger"
+
+    safe_ids = [aid for aid in astronauts if aid not in danger_astronaut_ids]
+    if not safe_ids: return
+
+    pairs = sorted(
+        [(dist_between(astronauts[d], astronauts[s]), d, s)
+         for d in danger_astronaut_ids for s in safe_ids]
+    )
+    assigned_d, assigned_s = set(), set()
+    for _, did, sid in pairs:
+        if did in assigned_d or sid in assigned_s: continue
+        helper_assignments[did] = sid
+        assigned_d.add(did); assigned_s.add(sid)
+
+    for did, sid in helper_assignments.items(): astronauts[sid]["status"] = "helper"
+    for did in danger_astronaut_ids:
+        if did not in helper_assignments: astronauts[did]["status"] = "danger_unassisted"
+
+# ── Graph + Dijkstra ─────────────────────────────────────────────────────────
+
+def build_shortest_paths():
+    """Build a free-space waypoint graph from trail history + checkpoints,
+       then run Dijkstra for each helper→danger pair."""
+    global shortest_paths
+    shortest_paths = {}
+    if not helper_assignments: return
+
+    # ── Collect nodes ──
+    nodes = []
+
+    # Sampled path history (every 3rd point to keep graph lean)
+    path_node_ranges = {}
     for aid in astronauts:
-        astronauts[aid]["status"] = "safe"
-    current_rescue_path = []
+        hist  = path_history[aid]
+        start = len(nodes)
+        sampled = [hist[i] for i in range(0, len(hist), 3)]
+        if hist and hist[-1] not in sampled: sampled.append(hist[-1])
+        nodes.extend(sampled)
+        path_node_ranges[aid] = (start, len(nodes), sampled)
 
-def clear_paths():
+    # Checkpoints
+    for cp in checkpoints:
+        nodes.append((cp["x"], cp["y"]))
+
+    # Current astronaut positions (always included as terminal nodes)
+    astro_idx = {}
     for aid, a in astronauts.items():
-        a["path"] = [(a["gx"], a["gy"])]
+        astro_idx[aid] = len(nodes)
+        nodes.append((a["x"], a["y"]))
 
-def set_danger(astro_id):
-    global current_rescue_path
-    reset_statuses()
-    astronauts[astro_id]["status"] = "danger"
+    n = len(nodes)
+    adj = [[] for _ in range(n)]
 
-    danger_pos = (astronauts[astro_id]["gx"], astronauts[astro_id]["gy"])
+    # ── Connect nodes within MAX_EDGE_DIST (spatial proximity) ──
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = math.dist(nodes[i], nodes[j])
+            if 0 < d <= MAX_EDGE_DIST:
+                adj[i].append((j, d))
+                adj[j].append((i, d))
 
-    best_helper = None
-    best_path = None
+    # ── Guarantee path continuity along each astronaut's trail ──
+    for aid, (start, end, sampled) in path_node_ranges.items():
+        for k in range(len(sampled) - 1):
+            i, j = start + k, start + k + 1
+            d = math.dist(nodes[i], nodes[j])
+            if d > 0 and not any(nb == j for nb, _ in adj[i]):
+                adj[i].append((j, d)); adj[j].append((i, d))
 
-    for aid, a in astronauts.items():
-        if aid == astro_id:
-            continue
+    # ── Dijkstra ──
+    def dijkstra(src, dst):
+        dist_arr = [math.inf] * n
+        prev     = [-1]       * n
+        dist_arr[src] = 0.0
+        heap = [(0.0, src)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > dist_arr[u]: continue
+            if u == dst:        break
+            for v, w in adj[u]:
+                nd = d + w
+                if nd < dist_arr[v]:
+                    dist_arr[v] = nd; prev[v] = u
+                    heapq.heappush(heap, (nd, v))
+        if math.isinf(dist_arr[dst]): return None
+        path, cur = [], dst
+        while cur != -1: path.append(nodes[cur]); cur = prev[cur]
+        path.reverse(); return path
 
-        helper_pos = (a["gx"], a["gy"])
-        path = bfs_shortest_path(helper_pos, danger_pos)
+    for did, sid in helper_assignments.items():
+        path = dijkstra(astro_idx[sid], astro_idx[did])
+        shortest_paths[did] = path if (path and len(path) >= 2) else [
+            (astronauts[sid]["x"], astronauts[sid]["y"]),
+            (astronauts[did]["x"], astronauts[did]["y"])
+        ]
 
-        if path is None:
-            continue
+# ── Color helpers ────────────────────────────────────────────────────────────
 
-        if best_path is None or len(path) < len(best_path):
-            best_path = path
-            best_helper = aid
+def color_for_status(s):
+    return {"safe": (0, 200, 0), "danger": (220, 50, 50),
+            "danger_unassisted": (255, 140, 0), "helper": (50, 100, 255)}.get(s, (200,200,200))
 
-    if best_helper is not None:
-        astronauts[best_helper]["status"] = "helper"
-        current_rescue_path = best_path
-    else:
-        current_rescue_path = []
+TRAIL_COLORS = {1: (0, 155, 110), 2: (40, 80, 210), 3: (160, 55, 200)}
+CP_COLORS    = {1: (0, 220, 180), 2: (220, 200, 0), 3: (200, 60, 230)}
 
-def color_for_status(status):
-    if status == "safe":
-        return (0, 200, 0)
-    elif status == "danger":
-        return (220, 50, 50)
-    elif status == "helper":
-        return (50, 180, 255)
-    return (200, 200, 200)
+trail_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+
+# ── Main loop ────────────────────────────────────────────────────────────────
 
 running = True
 while running:
+    clock.tick(60)
+    frame_counter += 1
     screen.fill((20, 20, 30))
 
-    # Draw grid
-    for x in range(0, WIDTH, CELL):
-        pygame.draw.line(screen, (45, 45, 60), (x, 0), (x, HEIGHT))
-    for y in range(0, HEIGHT, CELL):
-        pygame.draw.line(screen, (45, 45, 60), (0, y), (WIDTH, y))
+    # grid
+    for x in range(0, WIDTH, SCALE):
+        pygame.draw.line(screen, (40, 40, 50), (x, 0), (x, HEIGHT))
+    for y in range(0, HEIGHT, SCALE):
+        pygame.draw.line(screen, (40, 40, 50), (0, y), (WIDTH, y))
 
-    # Draw obstacles
-    for ox, oy in obstacles:
-        rect = pygame.Rect(ox * CELL, oy * CELL, CELL, CELL)
-        pygame.draw.rect(screen, (80, 80, 80), rect)
-
-    # Draw base at screen center
-    pygame.draw.circle(screen, (255, 255, 0), (CENTER_X, CENTER_Y), 12)
-    hub_text = font.render("BASE", True, (255, 255, 0))
-    screen.blit(hub_text, (CENTER_X + 15, CENTER_Y - 10))
-
+    # ── Events ──────────────────────────────────────────────────────────────
     for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
-
+        if event.type == pygame.QUIT: running = False
         if event.type == pygame.KEYDOWN:
-            # Astronaut 1: WASD
-            if event.key == pygame.K_w:
-                move_astronaut(1, 0, -1)
-            elif event.key == pygame.K_s:
-                move_astronaut(1, 0, 1)
-            elif event.key == pygame.K_a:
-                move_astronaut(1, -1, 0)
-            elif event.key == pygame.K_d:
-                move_astronaut(1, 1, 0)
+            if   event.key == pygame.K_1: toggle_danger(1)
+            elif event.key == pygame.K_2: toggle_danger(2)
+            elif event.key == pygame.K_3: toggle_danger(3)
+            elif event.key == pygame.K_r: reset_all()
+            elif event.key == pygame.K_q: set_checkpoint(1)   # Q → A1 checkpoint
+            elif event.key == pygame.K_u: set_checkpoint(2)   # U → A2 checkpoint
+            elif event.key == pygame.K_y: set_checkpoint(3)   # Y → A3 checkpoint
+            elif event.key == pygame.K_c: checkpoints.clear() # C → clear all checkpoints
 
-            # Optional testing keys for astronaut 2
-            elif event.key == pygame.K_i:
-                move_astronaut(2, 0, -1)
-            elif event.key == pygame.K_k:
-                move_astronaut(2, 0, 1)
-            elif event.key == pygame.K_j:
-                move_astronaut(2, -1, 0)
-            elif event.key == pygame.K_l:
-                move_astronaut(2, 1, 0)
+    keys = pygame.key.get_pressed()
 
-            # Optional testing keys for astronaut 3
-            elif event.key == pygame.K_t:
-                move_astronaut(3, 0, -1)
-            elif event.key == pygame.K_g:
-                move_astronaut(3, 0, 1)
-            elif event.key == pygame.K_f:
-                move_astronaut(3, -1, 0)
-            elif event.key == pygame.K_h:
-                move_astronaut(3, 1, 0)
+    # A1: WASD
+    if keys[pygame.K_a]: turn_left(1)
+    if keys[pygame.K_d]: turn_right(1)
+    if keys[pygame.K_w]: move_forward(1)
+    if keys[pygame.K_s]: move_backward(1)
+    # A2: IJKL
+    if keys[pygame.K_j]: turn_left(2)
+    if keys[pygame.K_l]: turn_right(2)
+    if keys[pygame.K_i]: move_forward(2)
+    if keys[pygame.K_k]: move_backward(2)
+    # A3: TFGH
+    if keys[pygame.K_f]: turn_left(3)
+    if keys[pygame.K_h]: turn_right(3)
+    if keys[pygame.K_t]: move_forward(3)
+    if keys[pygame.K_g]: move_backward(3)
 
-            elif event.key == pygame.K_1:
-                set_danger(1)
-            elif event.key == pygame.K_2:
-                set_danger(2)
-            elif event.key == pygame.K_3:
-                set_danger(3)
-            elif event.key == pygame.K_r:
-                reset_statuses()
-            elif event.key == pygame.K_c:
-                clear_paths()
+    # ── Logic ───────────────────────────────────────────────────────────────
+    update_assignments()
+    if frame_counter % REBUILD_INTERVAL == 0:
+        build_shortest_paths()
 
-    # Draw astronaut trails
+    # ── Draw trails (alpha-faded, older = dimmer) ────────────────────────────
+    trail_surf.fill((0, 0, 0, 0))
+    for aid in astronauts:
+        hist = path_history[aid]
+        r, g, b = TRAIL_COLORS[aid]
+        n_pts = len(hist)
+        if n_pts < 2: continue
+        spts = [world_to_screen(x, y) for x, y in hist]
+        for i in range(n_pts - 1):
+            frac  = i / max(n_pts - 2, 1)
+            alpha = int(45 + 160 * frac)          # older segments dimmer
+            pygame.draw.line(trail_surf, (r, g, b, alpha), spts[i], spts[i+1], 2)
+        # Footstep dots every 6 points
+        for i in range(0, n_pts, 6):
+            frac  = i / max(n_pts - 1, 1)
+            alpha = int(60 + 150 * frac)
+            pygame.draw.circle(trail_surf, (r, g, b, alpha), spts[i], 2)
+    screen.blit(trail_surf, (0, 0))
+
+    # ── Draw shortest paths (gold, replaces blue helper line) ───────────────
+    for did, path in shortest_paths.items():
+        if len(path) < 2: continue
+        pts = [world_to_screen(x, y) for x, y in path]
+        # Glow pass (thicker, dimmer)
+        for i in range(len(pts) - 1):
+            pygame.draw.line(screen, (120, 90, 0), pts[i], pts[i+1], 5)
+        # Core line
+        for i in range(len(pts) - 1):
+            pygame.draw.line(screen, (255, 215, 0), pts[i], pts[i+1], 2)
+        # Waypoint markers along path (skip first/last which are astronauts)
+        for pt in pts[1:-1]:
+            pygame.draw.circle(screen, (255, 215, 0), pt, 3)
+
+    # ── Draw checkpoints ────────────────────────────────────────────────────
+    for cp in checkpoints:
+        px, py = world_to_screen(cp["x"], cp["y"])
+        col    = CP_COLORS.get(cp["aid"], (200, 200, 200))
+        pygame.draw.rect(screen, col, (px - 7, py - 7, 14, 14), 2)
+        pygame.draw.line(screen, col, (px - 5, py),     (px + 5, py),     1)
+        pygame.draw.line(screen, col, (px,     py - 5), (px,     py + 5), 1)
+        screen.blit(small_font.render(cp["label"], True, col), (px + 9, py - 8))
+
+    # ── Hub ──────────────────────────────────────────────────────────────────
+    pygame.draw.circle(screen, (255, 255, 0), (CENTER_X, CENTER_Y), 12)
+    screen.blit(font.render("BASE (0,0)", True, (255, 255, 0)), (CENTER_X + 15, CENTER_Y - 10))
+
+    # ── Astronauts ───────────────────────────────────────────────────────────
     for aid, a in astronauts.items():
-        if len(a["path"]) >= 2:
-            for i in range(1, len(a["path"])):
-                x1, y1 = grid_to_screen(*a["path"][i - 1])
-                x2, y2 = grid_to_screen(*a["path"][i])
-                pygame.draw.line(screen, a["trail_color"], (x1, y1), (x2, y2), 4)
+        px, py = world_to_screen(a["x"], a["y"])
+        color  = color_for_status(a["status"])
+        hub_d  = dist_from_hub(aid)
 
-    # Draw rescue shortest path
-    if current_rescue_path and len(current_rescue_path) >= 2:
-        for i in range(1, len(current_rescue_path)):
-            x1, y1 = grid_to_screen(*current_rescue_path[i - 1])
-            x2, y2 = grid_to_screen(*current_rescue_path[i])
-            pygame.draw.line(screen, (50, 220, 255), (x1, y1), (x2, y2), 6)
-
-    # Draw astronauts
-    for aid, a in astronauts.items():
-        px, py = grid_to_screen(a["gx"], a["gy"])
-        color = color_for_status(a["status"])
-
+        pygame.draw.line(screen, (90, 90, 120), (CENTER_X, CENTER_Y), (px, py), 1)
         pygame.draw.circle(screen, color, (px, py), 14)
 
-        label = f"A{aid} | {a['status']} | ({a['gx']}, {a['gy']})"
-        text = font.render(label, True, (255, 255, 255))
-        screen.blit(text, (px + 18, py - 10))
+        hx = px + int(24 * math.cos(math.radians(a["heading"])))
+        hy = py - int(24 * math.sin(math.radians(a["heading"])))
+        pygame.draw.line(screen, (255, 255, 255), (px, py), (hx, hy), 2)
 
-    # Rescue message
-    danger_id = None
-    helper_id = None
-    for aid, a in astronauts.items():
-        if a["status"] == "danger":
-            danger_id = aid
-        elif a["status"] == "helper":
-            helper_id = aid
+        label = (f"A{aid} | {a['status']} | "
+                 f"x={a['x']:.2f}, y={a['y']:.2f} | "
+                 f"heading={a['heading']:.1f}° | dist to hub={hub_d:.2f}m")
+        screen.blit(font.render(label, True, (255, 255, 255)), (px + 18, py - 10))
 
-    if danger_id and helper_id:
-        msg = f"Shortest-path responder: Astronaut {helper_id} -> Assist Astronaut {danger_id}"
-        msg_text = font.render(msg, True, (50, 220, 255))
-        screen.blit(msg_text, (20, 20))
+    # ── Status panel ─────────────────────────────────────────────────────────
+    y_text = 20
+    if hub_alert:
+        screen.blit(font.render("HUB ALERT: Danger detected", True, (255, 80, 80)), (20, y_text))
+        y_text += 28
+    if transmit_signal:
+        screen.blit(font.render("TRANSMIT STATE: All astronauts in danger", True, (255, 180, 50)), (20, y_text))
+        y_text += 28
 
+    if helper_assignments:
+        for did, sid in helper_assignments.items():
+            path_info = ""
+            if did in shortest_paths:
+                p     = shortest_paths[did]
+                total = sum(math.dist(p[i], p[i+1]) for i in range(len(p)-1))
+                path_info = f"  [shortest path {total:.2f}m via {len(p)} nodes]"
+            msg = f"A{sid} → A{did}{path_info}"
+            screen.blit(font.render(msg, True, (50, 200, 255)), (20, y_text))
+            y_text += 28
+    elif danger_astronaut_ids and not transmit_signal:
+        screen.blit(font.render("No available helper for danger astronaut(s)", True, (255, 180, 50)), (20, y_text))
+        y_text += 28
+
+    # ── Instructions ─────────────────────────────────────────────────────────
     instructions = [
-        "A1: WASD",
-        "A2: IJKL",
-        "A3: TFGH",
-        "1/2/3 = mark astronaut in danger",
-        "R = reset statuses",
-        "C = clear trails"
+        "A1: W/S move, A/D turn    Q = drop A1 checkpoint",
+        "A2: I/K move, J/L turn    U = drop A2 checkpoint",
+        "A3: T/G move, F/H turn    Y = drop A3 checkpoint",
+        "1/2/3 = toggle danger     R = reset     C = clear checkpoints",
+        "Gold line = Dijkstra shortest path through explored trails + checkpoints",
     ]
-    for idx, line in enumerate(instructions):
-        text = font.render(line, True, (200, 200, 200))
-        screen.blit(text, (20, HEIGHT - 160 + idx * 25))
+    for i, line in enumerate(instructions):
+        screen.blit(font.render(line, True, (200, 200, 200)), (20, HEIGHT - 140 + i * 25))
 
     pygame.display.flip()
-    clock.tick(30)
 
 pygame.quit()
