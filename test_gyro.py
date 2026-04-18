@@ -117,16 +117,21 @@ def serial_reader():
 
                 while True:
                     raw = ser.readline().decode("utf-8", errors="ignore").strip()
+                    if raw:
+                        print("SERIAL RAW:", repr(raw))
+
                     if not raw or "," not in raw or not raw[0].lstrip("-").replace(".","").isdigit():
-                        continue   # skip header / blank lines
+                        continue
 
                     parts = raw.split(",")
                     if len(parts) != 9:
+                        print("SKIP bad part count:", len(parts), parts)
                         continue
 
                     try:
                         vals = list(map(float, parts))
                     except ValueError:
+                        print("SKIP bad float parse:", parts)
                         continue
 
                     with imu_lock:
