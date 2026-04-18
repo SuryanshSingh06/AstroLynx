@@ -43,7 +43,7 @@ MAX_TILT  = 45.0   # degrees — full tilt = edge of map
 MAP_RANGE = 6.0    # metres
 
 # ── Camera / Pi settings ─────────────────────────────────────────────────────
-PI_BASE_URL        = "http://192.168.0.123:5000"
+PI_BASE_URL        = "http://127.0.0.1:5000"
 CAMERA_TARGET_AID  = 1
 CAMERA_POLL_EVERY  = 15
 
