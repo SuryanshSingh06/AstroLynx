@@ -2,11 +2,13 @@ import pygame
 import math
 import heapq
 
+from lcd_bridge import LCDBridge, build_lcd_message
+
 pygame.init()
 
 WIDTH, HEIGHT = 1150, 780
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Astronaut Hub Map - Component Bridge Pathfinding")
+pygame.display.set_caption("Astronaut Hub Map - LCD Integrated")
 clock = pygame.time.Clock()
 font    = pygame.font.SysFont(None, 24)
 sm_font = pygame.font.SysFont(None, 18)
@@ -14,14 +16,18 @@ sm_font = pygame.font.SysFont(None, 18)
 CENTER_X, CENTER_Y = WIDTH // 2, HEIGHT // 2
 SCALE = 60
 
+LCD_ASTRONAUT_ID = 1
+LCD_PORT = "/dev/cu.usbmodem1101"
+LCD_BAUD = 115200
+
 MOVE_SPEED          = 0.04
 TURN_SPEED          = 2.5
-PATH_RECORD_DIST    = 0.10   # record often for dense trail
+PATH_RECORD_DIST    = 0.10
 MAX_PATH_POINTS     = 400
-GRAPH_CONNECT_R     = 0.40   # tight local edge radius (same trail overlap)
-GAP_BRIDGE_PENALTY  = 2.5    # cost multiplier on any cross-component bridge
-LOS_SAMPLE_STEP     = 0.20   # metres between LOS samples
-LOS_CLEAR_RADIUS    = 0.45   # sample "covered" if a node is within this
+GRAPH_CONNECT_R     = 0.40
+GAP_BRIDGE_PENALTY  = 2.5
+LOS_SAMPLE_STEP     = 0.20
+LOS_CLEAR_RADIUS    = 0.45
 PATH_RECOMPUTE_FREQ = 15
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -35,11 +41,13 @@ checkpoints: list = []
 danger_astronaut_ids: set  = set()
 helper_assignments:   dict = {}
 shortest_paths:       dict = {}
-bridge_segments:      dict = {}   # danger_id -> list of (p1,p2) that are bridges
+bridge_segments:      dict = {}
 hub_alert       = False
 transmit_signal = False
 frame_count     = 0
 path_dirty      = False
+
+lcd = LCDBridge(port=LCD_PORT, baud=LCD_BAUD)
 
 PATH_BASE_COLOR = {1: (0, 150, 40), 2: (30, 80, 220), 3: (190, 110, 0)}
 CP_COLOR        = {1: (160, 255, 120), 2: (100, 190, 255), 3: (255, 210, 80)}
@@ -92,13 +100,7 @@ def move_bwd(aid):
 def turn_l(aid): astronauts[aid]["heading"] = (astronauts[aid]["heading"] - TURN_SPEED) % 360
 def turn_r(aid): astronauts[aid]["heading"] = (astronauts[aid]["heading"] + TURN_SPEED) % 360
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Trail-aware LOS
-#
-# Sample points along p1→p2. Each sample must have a node within
-# LOS_CLEAR_RADIUS. If any sample falls in empty space → LOS blocked.
-# This means Theta* can only shortcut through already-walked ground.
-# ══════════════════════════════════════════════════════════════════════════════
+# ── LOS ───────────────────────────────────────────────────────────────────────
 def line_of_sight(p1, p2, nodes):
     x1, y1 = p1
     x2, y2 = p2
@@ -116,7 +118,6 @@ def line_of_sight(p1, p2, nodes):
             return False
     return True
 
-
 def theta_star_smooth(path, nodes):
     if len(path) < 3:
         return path
@@ -132,10 +133,7 @@ def theta_star_smooth(path, nodes):
         i = j
     return smoothed
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Union-Find  —  identify connected trail components
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Union-Find ────────────────────────────────────────────────────────────────
 class UF:
     def __init__(self, n):
         self.p = list(range(n))
@@ -156,23 +154,7 @@ class UF:
             groups.setdefault(self.find(i), []).append(i)
         return list(groups.values())
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Graph build + Dijkstra + Theta*
-#
-# Key idea  —  THREE phases:
-#
-#   Phase 1: Sequential trail edges  (true distance, no penalty)
-#             + tight cross-edges within GRAPH_CONNECT_R (overlapping trails)
-#
-#   Phase 2: Find connected components via Union-Find.
-#             For every pair of disconnected components find the SINGLE
-#             closest node-pair and add one bridge edge (penalised).
-#             → path must walk each trail to its nearest tip before crossing.
-#
-#   Phase 3: Dijkstra source=helper, dest=danger.
-#             Theta* post-smooths using trail-aware LOS.
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Graph build + solve ───────────────────────────────────────────────────────
 def build_and_solve():
     global shortest_paths, bridge_segments
     shortest_paths  = {}
@@ -180,7 +162,6 @@ def build_and_solve():
     if not helper_assignments:
         return
 
-    # ── Collect nodes ─────────────────────────────────────────────
     nodes: list = []
     path_slice: dict = {}
     cur_idx:    dict = {}
@@ -206,44 +187,35 @@ def build_and_solve():
         adj[j].append((i, cost))
         uf.union(i, j)
 
-    # ── Phase 1: trail edges + tight cross-edges ───────────────────
     GCR2 = GRAPH_CONNECT_R ** 2
 
     for aid in astronauts:
         s, e = path_slice[aid]
-        # Sequential
         for i in range(s, e - 1):
             d = hyp(nodes[i][0], nodes[i][1], nodes[i+1][0], nodes[i+1][1])
             add_edge(i, i + 1, d)
-        # Link current position to last trail point
         last = e - 1
         if last >= s:
             ci = cur_idx[aid]
             d  = hyp(nodes[ci][0], nodes[ci][1], nodes[last][0], nodes[last][1])
             add_edge(ci, last, d)
 
-    # Tight cross-edges (trail overlap / checkpoints merging into nearby trail)
     for i in range(n):
         xi, yi = nodes[i]
         for j in range(i + 1, n):
             dx = xi - nodes[j][0]; dy = yi - nodes[j][1]
             if dx*dx + dy*dy <= GCR2:
                 d = math.sqrt(dx*dx + dy*dy)
-                if not uf.same(i, j):        # only if not already connected
+                if not uf.same(i, j):
                     add_edge(i, j, d)
-                elif (j, d) not in adj[i]:   # avoid duplicate edges
+                elif (j, d) not in adj[i]:
                     adj[i].append((j, d))
                     adj[j].append((i, d))
 
-    # ── Phase 2: component bridging ────────────────────────────────
-    # Find components, then for every PAIR of components add ONE edge:
-    # the shortest possible bridge between them.
-    # Repeat until src and dst are connected (or we've tried all pairs).
-    bridge_edges_added = []   # for rendering: list of (node_i, node_j)
+    bridge_edges_added = []
 
     comps = uf.components(n)
     if len(comps) > 1:
-        # Build pair list sorted by closest inter-component distance
         inter_pairs = []
         for ci in range(len(comps)):
             for cj in range(ci + 1, len(comps)):
@@ -268,7 +240,6 @@ def build_and_solve():
                 uf.union(i, j)
                 bridge_edges_added.append((i, j))
 
-    # ── Phase 3: Dijkstra ─────────────────────────────────────────
     bridge_node_pairs = set()
     for i, j in bridge_edges_added:
         bridge_node_pairs.add((min(i,j), max(i,j)))
@@ -306,10 +277,8 @@ def build_and_solve():
         if raw:
             smoothed = theta_star_smooth(raw, nodes)
             shortest_paths[did] = smoothed
-            # Tag which consecutive segments in the smoothed path are bridges
             bsegs = []
             for i in range(len(smoothed) - 1):
-                # If LOS was NOT supported by trail (gap), it's a bridge visually
                 if not line_of_sight(smoothed[i], smoothed[i+1], nodes):
                     bsegs.append((smoothed[i], smoothed[i+1]))
             bridge_segments[did] = bsegs
@@ -319,7 +288,6 @@ def build_and_solve():
                 (astronauts[did]["x"], astronauts[did]["y"]),
             ]
             bridge_segments[did] = [(shortest_paths[did][0], shortest_paths[did][-1])]
-
 
 # ── Assignment logic ──────────────────────────────────────────────────────────
 def update_assignments():
@@ -356,7 +324,6 @@ def update_assignments():
         if did not in helper_assignments:
             astronauts[did]["status"] = "danger_unassisted"
 
-
 def toggle_danger(aid):
     global path_dirty
     danger_astronaut_ids.discard(aid) if aid in danger_astronaut_ids else danger_astronaut_ids.add(aid)
@@ -384,8 +351,10 @@ while running:
     clock.tick(60)
     screen.fill((20, 20, 30))
 
-    for gx in range(0, WIDTH,  SCALE): pygame.draw.line(screen, (40,40,50), (gx,0), (gx,HEIGHT))
-    for gy in range(0, HEIGHT, SCALE): pygame.draw.line(screen, (40,40,50), (0,gy), (WIDTH,gy))
+    for gx in range(0, WIDTH,  SCALE):
+        pygame.draw.line(screen, (40,40,50), (gx,0), (gx,HEIGHT))
+    for gy in range(0, HEIGHT, SCALE):
+        pygame.draw.line(screen, (40,40,50), (0,gy), (WIDTH,gy))
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -423,10 +392,19 @@ while running:
         build_and_solve()
         path_dirty = False
 
+    line1, line2 = build_lcd_message(
+        LCD_ASTRONAUT_ID,
+        astronauts,
+        helper_assignments,
+        shortest_paths
+    )
+    lcd.send(line1, line2)
+
     # ── Draw: path trails ─────────────────────────────────────────
     for aid, a in astronauts.items():
         path = a["path"]
-        if len(path) < 2: continue
+        if len(path) < 2:
+            continue
         base  = PATH_BASE_COLOR[aid]
         total = len(path)
         pts   = [w2s(px, py) for px, py in path]
@@ -444,9 +422,9 @@ while running:
 
     # ── Draw: shortest paths ──────────────────────────────────────
     for did, sp in shortest_paths.items():
-        if len(sp) < 2: continue
+        if len(sp) < 2:
+            continue
 
-        # Build set of bridge segments for fast lookup
         bset = set()
         for p1, p2 in bridge_segments.get(did, []):
             bset.add((p1, p2))
@@ -456,10 +434,8 @@ while running:
         for i in range(1, len(spts)):
             key = (sp[i-1], sp[i])
             is_bridge = key in bset
-            # Trail segment = cyan solid; gap bridge = orange dashed-ish (thinner)
             if is_bridge:
                 pygame.draw.line(screen, (255, 160, 0), spts[i-1], spts[i], 2)
-                # Dashes: draw white ticks along bridge to make it obvious
                 seg_px = math.hypot(spts[i][0]-spts[i-1][0], spts[i][1]-spts[i-1][1])
                 if seg_px > 20:
                     mx = (spts[i-1][0] + spts[i][0]) // 2
@@ -468,11 +444,9 @@ while running:
             else:
                 pygame.draw.line(screen, (0, 210, 215), spts[i-1], spts[i], 2)
 
-        # Waypoint dots (intermediate kept waypoints = real directional turns)
         for pt in spts[1:-1]:
             pygame.draw.circle(screen, (0, 180, 200), pt, 3)
 
-        # Distance label
         mid_w  = sp[len(sp) // 2]
         mx, my = w2s(mid_w[0], mid_w[1])
         d_lbl  = sm_font.render(f"{path_length(sp):.2f}m ({len(sp)} pts)", True, (0,220,220))
@@ -511,7 +485,7 @@ while running:
             sp   = shortest_paths.get(did, [])
             nb   = len(bridge_segments.get(did, []))
             info = f"  ({path_length(sp):.2f}m, {nb} bridge{'s' if nb!=1 else ''})" if sp else ""
-            screen.blit(font.render(f"A{sid} \u2192 A{did}{info}", True,(50,200,255)), (20,yt)); yt+=28
+            screen.blit(font.render(f"A{sid} -> A{did}{info}", True,(50,200,255)), (20,yt)); yt+=28
     elif danger_astronaut_ids and not transmit_signal:
         screen.blit(font.render("No available helper for danger astronauts", True,(255,180,50)),(20,yt)); yt+=28
     if checkpoints:
