@@ -224,7 +224,8 @@ while running:
 
     gas_danger = gas_in_danger
     obj_danger = camera_person_count >= 1
-    vib_danger = imu_vibration_danger(imu)
+    # vib_danger = imu_vibration_danger(imu)
+    vib_danger = False
 
     auto_danger = gas_danger or obj_danger or vib_danger
 
