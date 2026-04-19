@@ -175,9 +175,11 @@ while running:
     if gas_read is not None:
         gas_value = gas_read
 
-    detector.update()
-    camera_person_detected = detector.person_detected
-    camera_person_count = detector.person_count
+    # detector.update()
+    # camera_person_detected = detector.person_detected
+    # camera_person_count = detector.person_count
+    camera_person_count = 0
+
 
     # --- Danger logic for astronaut 1 ---
     # gas_danger = gas_value > 300
@@ -339,11 +341,11 @@ while running:
     screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Gas latched danger: {gas_in_danger}", True, (255,255,255)), (20, y)); y += 28
 
-    if detector.last_frame is not None:
-        frame = detector.last_frame
-        frame = pygame.image.frombuffer(frame.tobytes(), frame.shape[1::-1], "BGR")
-        frame = pygame.transform.scale(frame, (320, 240))
-        screen.blit(frame, (1160, 20))
+    # if detector.last_frame is not None:
+    #     frame = detector.last_frame
+    #     frame = pygame.image.frombuffer(frame.tobytes(), frame.shape[1::-1], "BGR")
+    #     frame = pygame.transform.scale(frame, (320, 240))
+    #     screen.blit(frame, (1160, 20))
 
     pygame.display.flip()
 
