@@ -616,7 +616,11 @@ while running:
     if path_dirty or (helper_assignments and frame_count%PATH_RECOMPUTE_FREQ==0):
         build_and_solve(); path_dirty=False
 
-    send_helper_led_guide(1)
+    # send_helper_led_guide(1)
+    if 1 in helper_assignments.values():
+        send_led_command("HELPER")
+    else:
+        send_led_command("OFF")
 
     # ── Draw: trails ─────────────────────────────────────────────────────
     for aid,a in astronauts.items():
