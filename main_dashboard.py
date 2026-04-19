@@ -50,6 +50,8 @@ path_dirty = False
 
 # manual_danger = False
 manual_override = None   # None / "danger" / "safe"
+manual_override_2 = None
+manual_override_3 = None
 GAS_DANGER_THRESHOLD = 300
 GAS_SAFE_THRESHOLD = 250   # hysteresis so it doesn't flap near 300
 gas_in_danger = False
@@ -224,12 +226,38 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         if event.type == pygame.KEYDOWN:
+
+            # Astronaut 1
             if event.key == pygame.K_1:
-                manual_override = "danger"   # force danger
+                manual_override = "danger"
+
             elif event.key == pygame.K_2:
-                manual_override = "safe"     # force safe
+                manual_override = "safe"
+
             elif event.key == pygame.K_3:
-                manual_override = None       # back to automatic sensor mode
+                manual_override = None
+
+
+            # Astronaut 2
+            elif event.key == pygame.K_4:
+                manual_override_2 = "danger"
+
+            elif event.key == pygame.K_5:
+                manual_override_2 = "safe"
+
+            elif event.key == pygame.K_6:
+                manual_override_2 = None
+
+
+            # Astronaut 3
+            elif event.key == pygame.K_7:
+                manual_override_3 = "danger"
+
+            elif event.key == pygame.K_8:
+                manual_override_3 = "safe"
+
+            elif event.key == pygame.K_9:
+                manual_override_3 = None
 
     # controls for 2 and 3
     keys = pygame.key.get_pressed()
@@ -246,6 +274,18 @@ while running:
         r = math.radians(astronauts[3]["heading"])
         astronauts[3]["x"] += 0.04 * math.cos(r)
         astronauts[3]["y"] += 0.04 * math.sin(r)
+
+    # Manual danger overrides for astronaut 2
+    if manual_override_2 == "danger":
+        danger_astronaut_ids.add(2)
+    elif manual_override_2 == "safe":
+        danger_astronaut_ids.discard(2)
+
+    # Manual danger overrides for astronaut 3
+    if manual_override_3 == "danger":
+        danger_astronaut_ids.add(3)
+    elif manual_override_3 == "safe":
+        danger_astronaut_ids.discard(3)
 
     update_assignments()
     build_simple_paths()
