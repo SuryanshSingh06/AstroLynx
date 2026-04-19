@@ -38,10 +38,12 @@ SERIAL_PORT  = "/dev/ttyUSB0"
 SERIAL_BAUD  = 115200
 IMU_ASTRO_ID = 1
 
+arduino_ser = None
+
 # ── IMU smoothing ─────────────────────────────────────────────────────────────
-MEDIAN_N  = 9      # must be odd — spike rejection window
-EMA_ALPHA = 0.20   # 0=frozen, 1=raw — trend smoothing speed
-DEADBAND  = 3.0    # degrees — noise floor near flat
+# MEDIAN_N  = 9      # must be odd — spike rejection window
+# EMA_ALPHA = 0.20   # 0=frozen, 1=raw — trend smoothing speed
+# DEADBAND  = 3.0    # degrees — noise floor near flat
 
 # ── Velocity control ──────────────────────────────────────────────────────────
 MAX_TILT_DEG = 30.0   # degrees at which MAX_SPEED is reached
@@ -63,10 +65,13 @@ camera_poll_counter    = 0
 # ── IMU shared state ──────────────────────────────────────────────────────────
 imu_lock = threading.Lock()
 imu_data = {"angX":0.0,"angY":0.0,"angZ":0.0,"connected":False,"raw":""}
+serial_conn = None
 
-_buf   = {k: deque([0.0]*MEDIAN_N, maxlen=MEDIAN_N) for k in ("X","Y")}
-f_angX = f_angY = 0.0
-vel_x  = vel_y  = 0.0
+# _buf   = {k: deque([0.0]*MEDIAN_N, maxlen=MEDIAN_N) for k in ("X","Y")}
+# f_angX = f_angY = 0.0
+# vel_x  = vel_y  = 0.0
+raw_angX = raw_angY = 0.0
+vel_x    = vel_y    = 0.0
 
 # ── CLI command queue ─────────────────────────────────────────────────────────
 command_queue = queue.Queue()
@@ -119,9 +124,12 @@ def path_length(pts): return sum(hyp(pts[i][0],pts[i][1],pts[i-1][0],pts[i-1][1]
 def serial_reader():
     while True:
         try:
+            global serial_conn
             with serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1) as ser:
+                serial_conn = ser
                 time.sleep(2)
-                with imu_lock: imu_data["connected"] = True
+                with imu_lock:
+                    imu_data["connected"] = True
                 while True:
                     raw = ser.readline().decode("utf-8", errors="ignore").strip()
                     if not raw or "," not in raw: continue
@@ -135,60 +143,125 @@ def serial_reader():
                         imu_data["angZ"] = vals[8]
                         imu_data["raw"]  = raw
         except (serial.SerialException, OSError):
+            serial_conn = None
             with imu_lock: imu_data["connected"] = False
             time.sleep(3)
+
+def open_arduino_serial():
+    global arduino_ser
+    while arduino_ser is None:
+        try:
+            arduino_ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
+            time.sleep(2)
+            print(f"[LED] Connected to Arduino on {SERIAL_PORT}")
+        except Exception as e:
+            print(f"[LED] Serial connect failed: {e}")
+            time.sleep(2)
+
+def send_led_command(cmd):
+    global serial_conn
+    if serial_conn is None:
+        return
+    try:
+        serial_conn.write((cmd.strip() + "\n").encode("utf-8"))
+    except Exception as e:
+        print(f"[LED] Send failed: {e}")
 
 threading.Thread(target=serial_reader, daemon=True).start()
 
 # ── IMU → velocity-based movement ────────────────────────────────────────────
+# def apply_imu_to_astronaut(aid, dt):
+#     global f_angX, f_angY, vel_x, vel_y
+
+#     with imu_lock:
+#         raw_X = imu_data["angX"]; raw_Y = imu_data["angY"]; conn = imu_data["connected"]
+#     if not conn: return
+
+#     # Layer 1: median spike rejection
+#     _buf["X"].append(raw_X); _buf["Y"].append(raw_Y)
+#     med_X = statistics.median(_buf["X"]); med_Y = statistics.median(_buf["Y"])
+
+#     # Layer 2: EMA trend smoothing
+#     f_angX = (1.0-EMA_ALPHA)*f_angX + EMA_ALPHA*med_X
+#     f_angY = (1.0-EMA_ALPHA)*f_angY + EMA_ALPHA*med_Y
+
+#     # Layer 3: deadband
+#     eff_X = 0.0 if abs(f_angX) < DEADBAND else f_angX
+#     eff_Y = 0.0 if abs(f_angY) < DEADBAND else f_angY
+
+#     # Layer 4: angle → target velocity
+#     tgt_vx = (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, eff_Y)) / MAX_TILT_DEG) * MAX_SPEED
+#     tgt_vy = (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, eff_X)) / MAX_TILT_DEG) * MAX_SPEED
+
+#     if eff_X == 0.0 and eff_Y == 0.0:
+#         vel_x *= FRICTION; vel_y *= FRICTION
+#         if abs(vel_x) < 0.002: vel_x = 0.0
+#         if abs(vel_y) < 0.002: vel_y = 0.0
+#     else:
+#         VA = 0.25
+#         vel_x = (1.0-VA)*vel_x + VA*tgt_vx
+#         vel_y = (1.0-VA)*vel_y + VA*tgt_vy
+
+#     # Layer 5: integrate
+#     a = astronauts[aid]
+#     old_x, old_y = a["x"], a["y"]
+#     new_x = max(-MAP_LIMIT, min(MAP_LIMIT, old_x + vel_x*dt))
+#     new_y = max(-MAP_LIMIT, min(MAP_LIMIT, old_y + vel_y*dt))
+#     a["x"] = new_x; a["y"] = new_y
+
+#     # Heading from velocity direction (no drifty gyro)
+#     spd = math.hypot(vel_x, vel_y)
+#     if spd > 0.05:
+#         a["heading"] = math.degrees(math.atan2(vel_y, vel_x)) % 360
+
+#     # Record path
+#     if hyp(new_x,new_y,old_x,old_y) >= PATH_RECORD_DIST:
+#         a["path"].append((new_x,new_y))
+#         if len(a["path"]) > MAX_PATH_POINTS: del a["path"][0]
 def apply_imu_to_astronaut(aid, dt):
-    global f_angX, f_angY, vel_x, vel_y
+    global raw_angX, raw_angY, vel_x, vel_y
 
     with imu_lock:
-        raw_X = imu_data["angX"]; raw_Y = imu_data["angY"]; conn = imu_data["connected"]
-    if not conn: return
+        raw_X = imu_data["angX"]
+        raw_Y = imu_data["angY"]
+        conn = imu_data["connected"]
 
-    # Layer 1: median spike rejection
-    _buf["X"].append(raw_X); _buf["Y"].append(raw_Y)
-    med_X = statistics.median(_buf["X"]); med_Y = statistics.median(_buf["Y"])
+    if not conn:
+        return
 
-    # Layer 2: EMA trend smoothing
-    f_angX = (1.0-EMA_ALPHA)*f_angX + EMA_ALPHA*med_X
-    f_angY = (1.0-EMA_ALPHA)*f_angY + EMA_ALPHA*med_Y
+    # Use raw angles directly
+    raw_angX = raw_X
+    raw_angY = raw_Y
 
-    # Layer 3: deadband
-    eff_X = 0.0 if abs(f_angX) < DEADBAND else f_angX
-    eff_Y = 0.0 if abs(f_angY) < DEADBAND else f_angY
+    # Raw angle -> target velocity
+    tgt_vx = (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, raw_angY)) / MAX_TILT_DEG) * MAX_SPEED
+    tgt_vy = (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, raw_angX)) / MAX_TILT_DEG) * MAX_SPEED
 
-    # Layer 4: angle → target velocity
-    tgt_vx = (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, eff_Y)) / MAX_TILT_DEG) * MAX_SPEED
-    tgt_vy = (max(-MAX_TILT_DEG, min(MAX_TILT_DEG, eff_X)) / MAX_TILT_DEG) * MAX_SPEED
+    # No deadband, no extra smoothing: velocity follows target immediately
+    vel_x = tgt_vx
+    vel_y = tgt_vy
 
-    if eff_X == 0.0 and eff_Y == 0.0:
-        vel_x *= FRICTION; vel_y *= FRICTION
-        if abs(vel_x) < 0.002: vel_x = 0.0
-        if abs(vel_y) < 0.002: vel_y = 0.0
-    else:
-        VA = 0.25
-        vel_x = (1.0-VA)*vel_x + VA*tgt_vx
-        vel_y = (1.0-VA)*vel_y + VA*tgt_vy
-
-    # Layer 5: integrate
+    # Integrate position
     a = astronauts[aid]
     old_x, old_y = a["x"], a["y"]
-    new_x = max(-MAP_LIMIT, min(MAP_LIMIT, old_x + vel_x*dt))
-    new_y = max(-MAP_LIMIT, min(MAP_LIMIT, old_y + vel_y*dt))
-    a["x"] = new_x; a["y"] = new_y
 
-    # Heading from velocity direction (no drifty gyro)
+    new_x = max(-MAP_LIMIT, min(MAP_LIMIT, old_x + vel_x * dt))
+    new_y = max(-MAP_LIMIT, min(MAP_LIMIT, old_y + vel_y * dt))
+
+    a["x"] = new_x
+    a["y"] = new_y
+
+    # Heading from velocity direction
     spd = math.hypot(vel_x, vel_y)
-    if spd > 0.05:
+    if spd > 0.001:
         a["heading"] = math.degrees(math.atan2(vel_y, vel_x)) % 360
 
     # Record path
-    if hyp(new_x,new_y,old_x,old_y) >= PATH_RECORD_DIST:
-        a["path"].append((new_x,new_y))
-        if len(a["path"]) > MAX_PATH_POINTS: del a["path"][0]
+    if hyp(new_x, new_y, old_x, old_y) >= PATH_RECORD_DIST:
+        a["path"].append((new_x, new_y))
+        if len(a["path"]) > MAX_PATH_POINTS:
+            del a["path"][0]
+
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 def update_camera_feed():
@@ -372,6 +445,58 @@ def reset_all():
         astronauts[aid]["path"]=[(astronauts[aid]["x"],astronauts[aid]["y"])]
     checkpoints.clear()
 
+def normalize_angle_deg(a):
+    return (a + 540) % 360 - 180
+
+def get_next_waypoint_for_helper(helper_id, arrive_dist=0.35):
+    assigned_did = None
+    for did, sid in helper_assignments.items():
+        if sid == helper_id:
+            assigned_did = did
+            break
+
+    if assigned_did is None:
+        return None
+
+    path = shortest_paths.get(assigned_did)
+    if not path:
+        return None
+
+    hx = astronauts[helper_id]["x"]
+    hy = astronauts[helper_id]["y"]
+
+    for px, py in path:
+        if math.hypot(px - hx, py - hy) > arrive_dist:
+            return (px, py)
+
+    return path[-1]
+
+def get_relative_direction_deg(helper_id):
+    wp = get_next_waypoint_for_helper(helper_id)
+    if wp is None:
+        return None
+
+    hx = astronauts[helper_id]["x"]
+    hy = astronauts[helper_id]["y"]
+    heading = astronauts[helper_id]["heading"]
+
+    tx, ty = wp
+    dx = tx - hx
+    dy = ty - hy
+
+    target_angle = math.degrees(math.atan2(dy, dx)) % 360
+    rel = normalize_angle_deg(target_angle - heading)
+    return rel
+
+def send_helper_led_guide(helper_id=1):
+    rel = get_relative_direction_deg(helper_id)
+
+    if rel is None:
+        send_led_command("OFF")
+        return
+
+    send_led_command(f"ANGLE:{rel:.2f}")
+
 def draw_diamond(cx,cy,sz,fill,outline):
     pts=[(cx,cy-sz),(cx+sz,cy),(cx,cy+sz),(cx-sz,cy)]
     pygame.draw.polygon(screen,fill,pts); pygame.draw.polygon(screen,outline,pts,1)
@@ -399,7 +524,8 @@ def print_status():
     print(f"  Danger: {sorted(danger_astronaut_ids)}  Checkpoints: {len(checkpoints)}")
     print(f"  Hub alert: {hub_alert}  Transmit: {transmit_signal}")
     with imu_lock: conn=imu_data["connected"]
-    print(f"  IMU: {'LIVE' if conn else 'NO SIGNAL'}  pitch={f_angX:.1f}°  roll={f_angY:.1f}°")
+    # print(f"  IMU: {'LIVE' if conn else 'NO SIGNAL'}  pitch={f_angX:.1f}°  roll={f_angY:.1f}°")
+    print(f"  IMU: {'LIVE' if conn else 'NO SIGNAL'}  pitch={raw_angX:.1f}°  roll={raw_angY:.1f}°")
     print(f"  vel=({vel_x:.2f},{vel_y:.2f}) m/s\n")
 
 def handle_cmd(cmd):
@@ -431,8 +557,10 @@ def handle_cmd(cmd):
     else:
         print(f"Unknown command: '{cmd}' — type 'help'")
 
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 print_help()
+open_arduino_serial()
 prev_time = time.time()
 
 while running:
@@ -487,6 +615,8 @@ while running:
     update_assignments()
     if path_dirty or (helper_assignments and frame_count%PATH_RECOMPUTE_FREQ==0):
         build_and_solve(); path_dirty=False
+
+    send_helper_led_guide(1)
 
     # ── Draw: trails ─────────────────────────────────────────────────────
     for aid,a in astronauts.items():
@@ -558,11 +688,13 @@ while running:
     spd=math.hypot(vel_x,vel_y)
     screen.blit(font.render(
         f"IMU A1 | {'LIVE' if conn else 'NO SIGNAL'} | "
-        f"pitch={f_angX:.1f}°  roll={f_angY:.1f}° | "
+        # f"pitch={f_angX:.1f}°  roll={f_angY:.1f}° | "
+        f"pitch={raw_angX:.1f}°  roll={raw_angY:.1f}° | "
         f"vel=({vel_x:.2f},{vel_y:.2f})  speed={spd:.2f} m/s",
         True,imu_col),(20,HEIGHT-55))
     screen.blit(font.render(
-        f"MEDIAN_N={MEDIAN_N}  EMA_α={EMA_ALPHA}  deadband=±{DEADBAND}°  "
+        # f"MEDIAN_N={MEDIAN_N}  EMA_α={EMA_ALPHA}  deadband=±{DEADBAND}°  "
+        f"RAW IMU MODE  no smoothing  no deadband  "
         f"friction={FRICTION}  max_speed={MAX_SPEED}m/s  |  CLI: type 'help'",
         True,(140,140,180)),(20,HEIGHT-30))
 
