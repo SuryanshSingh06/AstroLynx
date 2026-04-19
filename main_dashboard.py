@@ -20,8 +20,11 @@ sm_font = pygame.font.SysFont(None, 18)
 CENTER_X, CENTER_Y = 575, HEIGHT // 2
 SCALE = 60
 
-NANO_PORT = "/dev/cu.usbserial-XXXX"
-UNO_PORT  = "/dev/cu.usbmodemXXXX"
+# NANO_PORT = "/dev/cu.usbserial-XXXX"
+# UNO_PORT  = "/dev/cu.usbmodemXXXX"
+
+NANO_PORT = "/dev/ttyUSB0"
+UNO_PORT  = "/dev/ttyACM0"
 
 nano = NanoBridge(NANO_PORT)
 uno  = UnoBridge(UNO_PORT)
