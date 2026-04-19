@@ -34,6 +34,9 @@ PATH_RECOMPUTE_FREQ = 15
 MAX_TILT_DEG = 30.0
 MAX_SPEED = 3.0
 MAP_LIMIT = 8.0
+VISION_ENABLED = True
+VISION_INTERVAL = 0.3   # seconds, so about 3.3 detections/sec
+last_vision_time = 0
 
 astronauts = {
     1: {"x": 0.0, "y": 0.0, "heading": 0.0, "status":"safe", "path":[(0.0, 0.0)]},
@@ -175,10 +178,17 @@ while running:
     if gas_read is not None:
         gas_value = gas_read
 
-    # detector.update()
-    # camera_person_detected = detector.person_detected
-    # camera_person_count = detector.person_count
+        # --- Vision update (throttled) ---
+    if VISION_ENABLED:
+        if now - last_vision_time >= VISION_INTERVAL:
+            detector.update()
+            camera_person_detected = detector.person_detected
+            camera_person_count = detector.person_count
+            last_vision_time = now
+    else:
+        camera_person_detected = False
     camera_person_count = 0
+    # camera_person_count = 0
 
 
     # --- Danger logic for astronaut 1 ---
@@ -261,6 +271,12 @@ while running:
             elif event.key == pygame.K_9:
                 manual_override_3 = None
 
+            elif event.key == pygame.K_v:
+                VISION_ENABLED = not VISION_ENABLED
+                if not VISION_ENABLED:
+                    camera_person_detected = False
+                    camera_person_count = 0
+
     # controls for 2 and 3
     keys = pygame.key.get_pressed()
     if keys[pygame.K_j]: astronauts[2]["heading"] -= 2.5
@@ -341,11 +357,11 @@ while running:
     screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Gas latched danger: {gas_in_danger}", True, (255,255,255)), (20, y)); y += 28
 
-    # if detector.last_frame is not None:
-    #     frame = detector.last_frame
-    #     frame = pygame.image.frombuffer(frame.tobytes(), frame.shape[1::-1], "BGR")
-    #     frame = pygame.transform.scale(frame, (320, 240))
-    #     screen.blit(frame, (1160, 20))
+    if detector.last_frame is not None:
+        frame = detector.last_frame
+        frame = pygame.image.frombuffer(frame.tobytes(), frame.shape[1::-1], "BGR")
+        frame = pygame.transform.scale(frame, (320, 240))
+        screen.blit(frame, (1160, 20))
 
     pygame.display.flip()
 
