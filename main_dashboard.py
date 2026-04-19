@@ -184,14 +184,18 @@ while running:
         # --- Vision update (throttled) ---
     if VISION_ENABLED:
         if now - last_vision_time >= VISION_INTERVAL:
+            print("VISION BLOCK ENTERED", flush=True)
             detector.update()
+            print("DETECTOR UPDATE FINISHED", flush=True)
+
             camera_person_detected = detector.person_detected
             camera_person_count = detector.person_count
             last_vision_time = now
 
             print("detected:", camera_person_detected,
                 "count:", camera_person_count,
-                "manual:", manual_override)
+                "manual:", manual_override,
+                flush=True)
     else:
         camera_person_detected = False
         camera_person_count = 0
@@ -362,7 +366,8 @@ while running:
     screen.blit(font.render(f"Camera person: {camera_person_count}", True, (255,255,255)), (20, y)); y += 28
     # screen.blit(font.render(f"Manual danger: {manual_danger}", True, (255,255,255)), (20, y)); y += 28
     # screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
-    screen.blit(font.render(f"Manual override A1: {manual_override_1}", True, (255,255,255)), (20, y)); y += 28
+    # screen.blit(font.render(f"Manual override A1: {manual_override_1}", True, (255,255,255)), (20, y)); y += 28
+    screen.blit(font.render(f"Manual override A1: {manual_override}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Gas latched danger: {gas_in_danger}", True, (255,255,255)), (20, y)); y += 28
 
     if detector.last_frame is not None:
