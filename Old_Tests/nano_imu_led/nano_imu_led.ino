@@ -69,7 +69,8 @@ void setup() {
 
   byte status = mpu.begin();
   if (status != 0) {
-    while (1);
+    while (1)
+      ;
   }
 
   delay(1000);
@@ -83,14 +84,22 @@ void loop() {
   if (millis() - lastPrint >= 100) {
     lastPrint = millis();
 
-    Serial.print(mpu.getAccX(), 6);   Serial.print(",");
-    Serial.print(mpu.getAccY(), 6);   Serial.print(",");
-    Serial.print(mpu.getAccZ(), 6);   Serial.print(",");
-    Serial.print(mpu.getGyroX(), 6);  Serial.print(",");
-    Serial.print(mpu.getGyroY(), 6);  Serial.print(",");
-    Serial.print(mpu.getGyroZ(), 6);  Serial.print(",");
-    Serial.print(mpu.getAngleX(), 6); Serial.print(",");
-    Serial.print(mpu.getAngleY(), 6); Serial.print(",");
+    Serial.print(mpu.getAccX(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getAccY(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getAccZ(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getGyroX(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getGyroY(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getGyroZ(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getAngleX(), 6);
+    Serial.print(",");
+    Serial.print(mpu.getAngleY(), 6);
+    Serial.print(",");
     Serial.println(mpu.getAngleZ(), 6);
   }
 }
