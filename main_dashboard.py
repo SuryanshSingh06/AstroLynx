@@ -228,6 +228,17 @@ while running:
 
     auto_danger = gas_danger or obj_danger or vib_danger
 
+    print(
+        "TRIGGERS |",
+        "gas:", gas_danger,
+        "obj:", obj_danger,
+        "vib:", vib_danger,
+        "manual:", manual_override,
+        "final:", final_danger if 'final_danger' in locals() else "n/a",
+        "gas_value:", gas_value,
+        flush=True
+    )
+
     # manual_override:
     # None     -> use sensors normally
     # "danger" -> force danger
