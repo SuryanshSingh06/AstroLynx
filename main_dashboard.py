@@ -48,7 +48,12 @@ bridge_segments = {}
 frame_count = 0
 path_dirty = False
 
-manual_danger = False
+# manual_danger = False
+manual_override = None   # None / "danger" / "safe"
+GAS_DANGER_THRESHOLD = 300
+GAS_SAFE_THRESHOLD = 250   # hysteresis so it doesn't flap near 300
+gas_in_danger = False
+
 gas_value = 0
 camera_person_detected = False
 camera_person_count = 0
@@ -173,11 +178,43 @@ while running:
     camera_person_count = detector.person_count
 
     # --- Danger logic for astronaut 1 ---
-    gas_danger = gas_value > 300
+    # gas_danger = gas_value > 300
+    # obj_danger = camera_person_count >= 1
+    # vib_danger = imu_vibration_danger(imu)
+
+    # if gas_danger or obj_danger or vib_danger or manual_danger:
+    #     danger_astronaut_ids.add(1)
+    # else:
+    #     danger_astronaut_ids.discard(1)
+
+    # --- Danger logic for astronaut 1 ---
+
+    # Gas hysteresis:
+    # enter danger only when gas rises above GAS_DANGER_THRESHOLD
+    # return to safe only when gas falls below GAS_SAFE_THRESHOLD
+    if gas_value >= GAS_DANGER_THRESHOLD:
+        gas_in_danger = True
+    elif gas_value <= GAS_SAFE_THRESHOLD:
+        gas_in_danger = False
+
+    gas_danger = gas_in_danger
     obj_danger = camera_person_count >= 1
     vib_danger = imu_vibration_danger(imu)
 
-    if gas_danger or obj_danger or vib_danger or manual_danger:
+    auto_danger = gas_danger or obj_danger or vib_danger
+
+    # manual_override:
+    # None     -> use sensors normally
+    # "danger" -> force danger
+    # "safe"   -> force safe even if a sensor says danger
+    if manual_override == "danger":
+        final_danger = True
+    elif manual_override == "safe":
+        final_danger = False
+    else:
+        final_danger = auto_danger
+
+    if final_danger:
         danger_astronaut_ids.add(1)
     else:
         danger_astronaut_ids.discard(1)
@@ -188,7 +225,11 @@ while running:
             running = False
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_1:
-                manual_danger = not manual_danger
+                manual_override = "danger"   # force danger
+            elif event.key == pygame.K_2:
+                manual_override = "safe"     # force safe
+            elif event.key == pygame.K_3:
+                manual_override = None       # back to automatic sensor mode
 
     # controls for 2 and 3
     keys = pygame.key.get_pressed()
@@ -254,7 +295,9 @@ while running:
     y = 20
     screen.blit(font.render(f"Gas: {gas_value}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Camera person: {camera_person_count}", True, (255,255,255)), (20, y)); y += 28
-    screen.blit(font.render(f"Manual danger: {manual_danger}", True, (255,255,255)), (20, y)); y += 28
+    # screen.blit(font.render(f"Manual danger: {manual_danger}", True, (255,255,255)), (20, y)); y += 28
+    screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
+    screen.blit(font.render(f"Gas latched danger: {gas_in_danger}", True, (255,255,255)), (20, y)); y += 28
 
     if detector.last_frame is not None:
         frame = detector.last_frame
