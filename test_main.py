@@ -65,7 +65,7 @@ gas_in_danger = False
 
 gas_value = 0
 camera_person_detected = False
-# camera_person_count = 0
+camera_person_count = 0
 
 MOVE_SPEED = 0.04
 TURN_SPEED = 2.5
@@ -465,7 +465,7 @@ while running:
     obj_danger = camera_person_count >= 1
     # vib_danger = imu_vibration_danger(imu)
     vib_danger = False
-    
+
     auto_danger_1 = gas_danger or obj_danger or vib_danger
 
     # astronaut 1

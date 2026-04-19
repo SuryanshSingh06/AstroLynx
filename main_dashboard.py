@@ -188,9 +188,13 @@ while running:
             camera_person_detected = detector.person_detected
             camera_person_count = detector.person_count
             last_vision_time = now
+
+            print("detected:", camera_person_detected,
+                "count:", camera_person_count,
+                "manual:", manual_override)
     else:
         camera_person_detected = False
-    camera_person_count = 0
+        camera_person_count = 0
     # camera_person_count = 0
 
 
@@ -357,7 +361,8 @@ while running:
     screen.blit(font.render(f"Gas: {gas_value}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Camera person: {camera_person_count}", True, (255,255,255)), (20, y)); y += 28
     # screen.blit(font.render(f"Manual danger: {manual_danger}", True, (255,255,255)), (20, y)); y += 28
-    screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
+    # screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
+    screen.blit(font.render(f"Manual override A1: {manual_override_1}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Gas latched danger: {gas_in_danger}", True, (255,255,255)), (20, y)); y += 28
 
     if detector.last_frame is not None:
