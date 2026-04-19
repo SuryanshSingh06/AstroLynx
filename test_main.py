@@ -65,7 +65,7 @@ gas_in_danger = False
 
 gas_value = 0
 camera_person_detected = False
-camera_person_count = 0
+# camera_person_count = 0
 
 MOVE_SPEED = 0.04
 TURN_SPEED = 2.5
@@ -435,7 +435,7 @@ while running:
             last_vision_time = now
     else:
         camera_person_detected = False
-    camera_person_count = 0
+        camera_person_count = 0
     # camera_person_count = 0
 
 
@@ -463,8 +463,9 @@ while running:
 
     gas_danger = gas_in_danger
     obj_danger = camera_person_count >= 1
-    vib_danger = imu_vibration_danger(imu)
-
+    # vib_danger = imu_vibration_danger(imu)
+    vib_danger = False
+    
     auto_danger_1 = gas_danger or obj_danger or vib_danger
 
     # astronaut 1
@@ -498,7 +499,7 @@ while running:
         danger_astronaut_ids.add(2)
     if final_danger_3:
         danger_astronaut_ids.add(3)
-        danger_astronaut_ids.discard(1)
+        # danger_astronaut_ids.discard(1)
 
     # --- Events ---
     for event in pygame.event.get():
@@ -651,7 +652,7 @@ while running:
     screen.blit(font.render(f"Gas: {gas_value}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Camera person: {camera_person_count}", True, (255,255,255)), (20, y)); y += 28
     # screen.blit(font.render(f"Manual danger: {manual_danger}", True, (255,255,255)), (20, y)); y += 28
-    screen.blit(font.render(f"Manual override: {manual_override}", True, (255,255,255)), (20, y)); y += 28
+    screen.blit(font.render(f"Manual override A1: {manual_override_1}", True, (255,255,255)), (20, y)); y += 28
     screen.blit(font.render(f"Gas latched danger: {gas_in_danger}", True, (255,255,255)), (20, y)); y += 28
 
     if helper_assignments:
